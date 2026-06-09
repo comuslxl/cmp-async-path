@@ -102,20 +102,23 @@ function source.resolve(_, completion_item, callback)
     --- Read file in thread
     ---@param filepath string
     ---@param count number max line count (-1 if no max)
-    ---@return string?, string?, string? (error, kind, contents) either some error or the kind and content-to-be-previewed
+    ---@return string|nil, string (error, serialized_table) either some error or the serialized table
     function(filepath, count)
       local ok, binary = pcall(io.open, filepath, "rb")
       if not ok or binary == nil then
-        ---@diagnostic disable-next-line: redundant-return-value
-        return nil, "binary", "« cannot read this file »"
+        return nil,
+          require("utils.luatexts").save({
+            kind = "binary",
+            contents = "« cannot read this file »",
+          })
       end
       local first_kb = binary:read(1024)
       if first_kb == nil or first_kb == "" then
-        return nil, "binary", "« empty file »"
+        return nil, require("utils.luatexts").save({ kind = "binary", contents = "« empty file »" })
       end
 
       if first_kb:find("\0") then
-        return nil, "binary", "binary file"
+        return nil, require("utils.luatexts").save({ kind = "binary", contents = "binary file" })
       end
 
       local contents = {}
@@ -125,26 +128,30 @@ function source.resolve(_, completion_item, callback)
           break
         end
       end
-      return nil, nil, contents
+      return nil, require("utils.luatexts").save({ kind = "text", contents = contents })
     end,
     --- deserialize doc and call callback(…)
     ---@param worker_error string?
-    ---@param kind string?
-    ---@param contents string?
-    function(worker_error, kind, contents)
+    ---@param serialized_fileinfo string
+    function(worker_error, serialized_fileinfo)
       if worker_error then
         error(string.format("Worker error while fetching file doc: %s", worker_error))
       end
+      local read_ok, file_info = require("utils.luatexts").load(serialized_fileinfo)
+      if not read_ok then
+        error(string.format("Unexpected problem de-serializing item info: «%s»", serialized_fileinfo))
+      end
 
-      if kind == "binary" then
+      if file_info.kind == "binary" then
         ---@type lsp.MarkupKind
         local documentation = {
           kind = vim.lsp.protocol.MarkupKind.PlainText,
-          value = contents,
+          value = file_info.contents,
         }
         completion_item.documentation = documentation
       else
-        local filetype = vim.filetype.match({ contents = contents })
+        local contents = file_info.contents ---@type table
+        local filetype = vim.filetype.match({ contents = file_info.contents })
         if not filetype then
           completion_item.documentation = {
             kind = vim.lsp.protocol.MarkupKind.PlainText,
