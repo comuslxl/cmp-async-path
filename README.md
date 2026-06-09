@@ -96,3 +96,7 @@ require'cmp'.setup {
     require "cmp.config.default"().sorting.comparators)
   }
 }
+
+## luatexts
+
+Lua source code for luatexts was embedded. Code originally comes from https://github.com/agladysh/luatexts/

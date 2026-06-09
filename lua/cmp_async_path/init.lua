@@ -102,27 +102,20 @@ function source.resolve(_, completion_item, callback)
     --- Read file in thread
     ---@param filepath string
     ---@param count number max line count (-1 if no max)
-    ---@return string|nil, string (error, serialized_table) either some error or the serialized table
+    ---@return string?, string?, string? (error, kind, contents) either some error or the kind and content-to-be-previewed
     function(filepath, count)
       local ok, binary = pcall(io.open, filepath, "rb")
       if not ok or binary == nil then
         ---@diagnostic disable-next-line: redundant-return-value
-        return nil,
-          vim.json.encode({
-            kind = "binary",
-            contents = "« cannot read this file »",
-          })
+        return nil, "binary", "« cannot read this file »"
       end
-      ---@diagnostic disable-next-line: need-check-nil
       local first_kb = binary:read(1024)
       if first_kb == nil or first_kb == "" then
-        ---@diagnostic disable-next-line: redundant-return-value
-        return nil, vim.json.encode({ kind = "binary", contents = "« empty file »" })
+        return nil, "binary", "« empty file »"
       end
 
       if first_kb:find("\0") then
-        ---@diagnostic disable-next-line: redundant-return-value
-        return nil, vim.json.encode({ kind = "binary", contents = "binary file" })
+        return nil, "binary", "binary file"
       end
 
       local contents = {}
@@ -132,32 +125,25 @@ function source.resolve(_, completion_item, callback)
           break
         end
       end
-      ---@diagnostic disable-next-line: redundant-return-value
-      return nil, vim.json.encode({ contents = contents })
+      return nil, nil, contents
     end,
     --- deserialize doc and call callback(…)
-    ---@param serialized_fileinfo string
-    function(worker_error, serialized_fileinfo)
-      ---@diagnostic disable-next-line: unnecessary-if
+    ---@param worker_error string?
+    ---@param kind string?
+    ---@param contents string?
+    function(worker_error, kind, contents)
       if worker_error then
         error(string.format("Worker error while fetching file doc: %s", worker_error))
       end
 
-      local read_ok, file_info =
-        pcall(vim.json.decode, serialized_fileinfo, { luanil = { object = true, array = true } })
-      if not read_ok then
-        error(string.format("Unexpected problem de-serializing item info: «%s»", serialized_fileinfo))
-      end
-      if file_info.kind == "binary" then
+      if kind == "binary" then
         ---@type lsp.MarkupKind
         local documentation = {
           kind = vim.lsp.protocol.MarkupKind.PlainText,
-          value = file_info.contents,
+          value = contents,
         }
         completion_item.documentation = documentation
       else
-        ---@diagnostic disable-next-line: assign-type-mismatch
-        local contents = file_info.contents ---@type table
         local filetype = vim.filetype.match({ contents = contents })
         if not filetype then
           completion_item.documentation = {
@@ -246,7 +232,7 @@ end
 ---@param option cmp_path.Option
 ---@param callback function(err:nil|string, candidates:lsp.CompletionResponse|nil)
 function source._candidates(_, dirname, include_hidden, option, callback)
-  local entries, err = vim.uv.fs_scandir(dirname)
+  local work_entries, err = vim.uv.fs_scandir(dirname)
   if err then
     return callback(err, nil)
   end
@@ -257,29 +243,29 @@ function source._candidates(_, dirname, include_hidden, option, callback)
     --- This function is called in a separate thread, so errors are caught and serialized
     ---@param _entries uv.uv_fs_t
     ---@param _dirname string see vim.fn.resolve()
-    ---@param _include_hidden boolean
+    ---@param including_hidden boolean
     ---@param label_trailing_slash boolean
     ---@param trailing_slash boolean
     ---@param file_kind lsp.CompletionItemKind see cmp.lsp.CompletionItemKind.File
     ---@param folder_kind lsp.CompletionItemKind see cmp.lsp.CompletionItemKind.Folder
     ---@return string|nil, string (error, serialized_results) "error text", nil or nil, "serialized items"
-    function(_entries, _dirname, _include_hidden, label_trailing_slash, trailing_slash, file_kind, folder_kind)
+    function(entries, resolved_dirname, including_hidden, label_trailing_slash, trailing_slash, file_kind, folder_kind)
+      local uv = require("luv")
       ---@type lsp.CompletionItem[]
       local items = {}
 
       local function create_item(name, fs_type)
-        if not (_include_hidden or string.sub(name, 1, 1) ~= ".") then
+        if not (including_hidden or string.sub(name, 1, 1) ~= ".") then
           return
         end
 
-        local path = _dirname .. "/" .. name
-        local stat = vim.uv.fs_stat(path)
+        local path = resolved_dirname .. "/" .. name
+        local stat = uv.fs_stat(path)
         local lstat = nil
         if stat then
           fs_type = stat.type
         elseif fs_type == "link" then
-          ---@diagnostic disable-next-line: missing-parameter, param-type-mismatch
-          lstat = vim.uv.fs_lstat(_dirname)
+          lstat = uv.fs_lstat(resolved_dirname)
           if not lstat then
             -- Broken symlink
             return
@@ -313,7 +299,7 @@ function source._candidates(_, dirname, include_hidden, option, callback)
       end
 
       while true do
-        local name, fs_type, e = vim.uv.fs_scandir_next(_entries)
+        local name, fs_type, e = uv.fs_scandir_next(entries)
         if e then
           ---@diagnostic disable-next-line: redundant-return-value
           return fs_type, ""
@@ -324,8 +310,7 @@ function source._candidates(_, dirname, include_hidden, option, callback)
         create_item(name, fs_type)
       end
 
-      ---@diagnostic disable-next-line: redundant-return-value
-      return nil, vim.json.encode(items)
+      return nil, require("utils.luatexts").save(items)
     end,
     --- Receive serialiazed entries, deserialize them, call callback(entries)
     --- This function is called in the main thread
@@ -338,7 +323,7 @@ function source._candidates(_, dirname, include_hidden, option, callback)
       end
       ---@diagnostic disable-next-line: assign-type-mismatch
       ---@type boolean, lsp.CompletionItem[]
-      local read_ok, items = pcall(vim.json.decode, serialized_items, { luanil = { object = true, array = true } })
+      local read_ok, items = require("utils.luatexts").load(serialized_items)
       if not read_ok then
         callback("Problem de-serializing file entries", nil)
       end
@@ -347,7 +332,7 @@ function source._candidates(_, dirname, include_hidden, option, callback)
   )
 
   work:queue(
-    entries,
+    work_entries,
     dirname,
     include_hidden,
     option.label_trailing_slash,
