@@ -22,6 +22,7 @@ local constants = { max_lines = 20 }
 ---@field public get_cwd fun(table): string
 ---@field public show_hidden_files_by_default boolean
 
+local zsh_re = vim.regex([[\v^zsh[a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9]([.]zsh)?$]])
 ---@type cmp_path.Option
 local defaults = {
   trailing_slash = false,
@@ -31,12 +32,9 @@ local defaults = {
     local buffer_pathname = vim.api.nvim_buf_get_name(bufnr)
     local basename = vim.fs.basename(buffer_pathname or "")
     local dirname = vim.fn.expand(("#%d:p:h"):format(bufnr))
-    if
-      string.find(basename, "^zsh[a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9][a-zA-Z0-9]$")
-      and string.find(dirname, "t[e]?mp")
-    then
+    if zsh_re:match_str(basename) and string.find(dirname, "t[e]?mp") then
       -- invoked editor with ^x^e from zsh
-      return vim.uv.cwd()
+      return vim.env.PWD or vim.uv.cwd()
     end
     return dirname
   end,
